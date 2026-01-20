@@ -1,0 +1,241 @@
+from flask import Flask, request, jsonify
+from datetime import datetime
+import os
+
+app = Flask(__name__)
+
+# Compteur global
+stats = {
+    "total_requests": 0,
+    "buy_signals": 0,
+    "sell_signals": 0,
+    "neutral_signals": 0,
+    "last_signal_time": None
+}
+
+def log_message(message, level="INFO"):
+    """Logs avec timestamp"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [{level}] {message}")
+
+def analyze_market(bid, ask, atr, rsi):
+    """
+    Stratégie de trading optimisée pour XAUUSD
+    """
+    signal = "NEUTRAL"
+    confidence = 0.5
+    reasons = []
+    
+    # === ANALYSE RSI (Indicateur Principal) ===
+    if rsi < 30:
+        signal = "BUY"
+        confidence = 0.70 + (30 - rsi) / 100
+        reasons.append(f"RSI survendu à {rsi:.1f}")
+        
+        # Bonus si RSI < 25 (zone extrême)
+        if rsi < 25:
+            confidence = min(confidence + 0.15, 0.95)
+            reasons.append("Zone de rebond fort")
+            
+    elif rsi > 70:
+        signal = "SELL"
+        confidence = 0.70 + (rsi - 70) / 100
+        reasons.append(f"RSI suracheté à {rsi:.1f}")
+        
+        # Bonus si RSI > 75
+        if rsi > 75:
+            confidence = min(confidence + 0.15, 0.95)
+            reasons.append("Zone de correction forte")
+    
+    else:
+        reasons.append(f"RSI neutre à {rsi:.1f}")
+    
+    # === ANALYSE SPREAD ===
+    spread = ask - bid
+    spread_pct = (spread / bid) * 100
+    
+    if spread_pct > 0.05:  # Spread > 0.05%
+        old_signal = signal
+        signal = "NEUTRAL"
+        confidence = 0.25
+        reasons.append(f"Spread trop élevé ({spread_pct:.3f}%)")
+        if old_signal != "NEUTRAL":
+            reasons.append(f"Signal {old_signal} annulé")
+    
+    # === ANALYSE VOLATILITÉ (ATR) ===
+    if atr < 0.4:
+        confidence *= 0.75
+        reasons.append("Volatilité très faible - Prudence")
+    elif atr > 2.5:
+        confidence *= 0.85
+        reasons.append("Volatilité élevée - Risque accru")
+    else:
+        reasons.append(f"Volatilité normale (ATR: {atr:.2f})")
+    
+    # === ZONES CRITIQUES ===
+    # Gold entre 2000-2100 (zones psychologiques)
+    if 2000 <= bid <= 2100:
+        if signal == "BUY" and bid < 2020:
+            confidence = min(confidence + 0.05, 0.95)
+            reasons.append("Support psychologique 2000")
+        elif signal == "SELL" and bid > 2080:
+            confidence = min(confidence + 0.05, 0.95)
+            reasons.append("Résistance psychologique 2100")
+    
+    # Mise à jour statistiques
+    stats["total_requests"] += 1
+    if signal == "BUY":
+        stats["buy_signals"] += 1
+    elif signal == "SELL":
+        stats["sell_signals"] += 1
+    else:
+        stats["neutral_signals"] += 1
+    stats["last_signal_time"] = datetime.now().isoformat()
+    
+    return {
+        "signal": signal,
+        "confidence": round(confidence, 2),
+        "reasons": reasons,
+        "metrics": {
+            "rsi": round(rsi, 2),
+            "atr": round(atr, 5),
+            "spread": round(spread, 5),
+            "spread_pct": round(spread_pct, 4)
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.route('/', methods=['GET'])
+def home():
+    """Page d'accueil"""
+    return jsonify({
+        "service": "IA Trading Signal API",
+        "version": "1.0",
+        "status": "Operational",
+        "endpoints": {
+            "/signal": "POST - Obtenir signal de trading",
+            "/health": "GET - État du service",
+            "/stats": "GET - Statistiques",
+            "/test": "GET - Test avec données exemple"
+        },
+        "documentation": "Envoyer POST /signal avec {symbol, bid, ask, atr, rsi}"
+    })
+
+@app.route('/signal', methods=['POST'])
+def get_signal():
+    """Endpoint principal pour les signaux"""
+    try:
+        data = request.json
+        
+        # Extraction et validation
+        symbol = data.get('symbol', 'UNKNOWN')
+        bid = float(data.get('bid', 0))
+        ask = float(data.get('ask', 0))
+        atr = float(data.get('atr', 0))
+        rsi = float(data.get('rsi', 50))
+        
+        # Validation basique
+        if bid <= 0 or ask <= 0:
+            return jsonify({
+                "error": "Prix invalides",
+                "signal": "NEUTRAL"
+            }), 400
+        
+        log_message(f"Signal demandé: {symbol} | BID={bid:.2f} ASK={ask:.2f} RSI={rsi:.1f}")
+        
+        # Analyse
+        result = analyze_market(bid, ask, atr, rsi)
+        
+        log_message(
+            f"Signal généré: {result['signal']} "
+            f"(Confiance: {result['confidence']}) | "
+            f"Raisons: {', '.join(result['reasons'])}"
+        )
+        
+        return jsonify(result)
+        
+    except ValueError as e:
+        log_message(f"Erreur de validation: {str(e)}", "ERROR")
+        return jsonify({
+            "error": "Données invalides",
+            "signal": "NEUTRAL",
+            "message": str(e)
+        }), 400
+        
+    except Exception as e:
+        log_message(f"Erreur serveur: {str(e)}", "ERROR")
+        return jsonify({
+            "error": "Erreur interne",
+            "signal": "NEUTRAL",
+            "message": str(e)
+        }), 500
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check"""
+    return jsonify({
+        "status": "OK",
+        "service": "IA Trading Signal",
+        "version": "1.0",
+        "uptime": "Active",
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/stats', methods=['GET'])
+def get_stats():
+    """Statistiques du service"""
+    buy_rate = (stats["buy_signals"] / stats["total_requests"] * 100) if stats["total_requests"] > 0 else 0
+    sell_rate = (stats["sell_signals"] / stats["total_requests"] * 100) if stats["total_requests"] > 0 else 0
+    neutral_rate = (stats["neutral_signals"] / stats["total_requests"] * 100) if stats["total_requests"] > 0 else 0
+    
+    return jsonify({
+        "total_requests": stats["total_requests"],
+        "signals": {
+            "buy": stats["buy_signals"],
+            "sell": stats["sell_signals"],
+            "neutral": stats["neutral_signals"]
+        },
+        "rates": {
+            "buy_rate": f"{buy_rate:.1f}%",
+            "sell_rate": f"{sell_rate:.1f}%",
+            "neutral_rate": f"{neutral_rate:.1f}%"
+        },
+        "last_signal": stats["last_signal_time"]
+    })
+
+@app.route('/test', methods=['GET'])
+def test():
+    """Test avec données simulées"""
+    test_scenarios = [
+        {
+            "name": "RSI Survendu",
+            "data": {"bid": 2050.50, "ask": 2050.70, "atr": 1.25, "rsi": 28.0}
+        },
+        {
+            "name": "RSI Suracheté",
+            "data": {"bid": 2080.30, "ask": 2080.55, "atr": 1.40, "rsi": 76.0}
+        },
+        {
+            "name": "RSI Neutre",
+            "data": {"bid": 2065.00, "ask": 2065.25, "atr": 1.15, "rsi": 52.0}
+        }
+    ]
+    
+    results = []
+    for scenario in test_scenarios:
+        result = analyze_market(**scenario["data"])
+        results.append({
+            "scenario": scenario["name"],
+            "signal": result["signal"],
+            "confidence": result["confidence"]
+        })
+    
+    return jsonify({
+        "test_results": results,
+        "message": "Tests exécutés avec succès"
+    })
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    log_message(f"Démarrage serveur sur port {port}", "INFO")
+    app.run(host='0.0.0.0', port=port)
